@@ -75,18 +75,27 @@ class TestUsage(Sandbox):
         # the cap is in budget.spent() units: estimated output x 3 (thorough) x spent_ratio (seed 5)
         self.assertEqual(r["cap"], int(r["est_output"] * 3 * 5))
 
+    STAGES = [{"phase": "Feature", "prefix": "impl:", "role": "implement", "agents": 3},
+              {"phase": "Feature", "prefix": "fix:", "role": "fix", "agents": 3},
+              {"phase": "Gate", "role": "mechanical", "agents": 1, "wait": 3600}]
+
+    def times(self, sequential, concurrency):
+        # fixed concurrency: otherwise it comes from the CPUs, and a 3-CPU runner runs one agent at a time
+        self.env["CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS"] = str(concurrency)
+        plan = {"name": "t", "stages": self.STAGES, **({"sequential": True} if sequential else {})}
+        return json.loads(self.run_py(USAGE, "estimate", self.write_plan(plan), "--json"))["levels"]["thorough"]
+
     def test_sequential_plan_takes_as_long_as_its_sum(self):
-        stages = [{"phase": "Feature", "prefix": "impl:", "role": "implement", "agents": 3},
-                  {"phase": "Feature", "prefix": "fix:", "role": "fix", "agents": 3},
-                  {"phase": "Gate", "role": "mechanical", "agents": 1, "wait": 3600}]
-        serial = json.loads(self.run_py(USAGE, "estimate", self.write_plan(
-            {"name": "s", "sequential": True, "stages": stages}), "--json"))["levels"]["thorough"]
+        serial = self.times(sequential=True, concurrency=8)
         self.assertAlmostEqual(serial["wall_s"], serial["seq_s"])
         self.assertEqual(serial["wait_s"], 3600)
-        free = json.loads(self.run_py(USAGE, "estimate", self.write_plan(
-            {"name": "p", "stages": stages}), "--json"))["levels"]["thorough"]
+        free = self.times(sequential=False, concurrency=8)
         self.assertLess(free["wall_s"], serial["wall_s"])
         self.assertLessEqual(free["wall_s"], free["seq_s"])   # parallel never longer than sequential
+
+    def test_one_agent_at_a_time_is_sequential_anyway(self):
+        free = self.times(sequential=False, concurrency=1)
+        self.assertAlmostEqual(free["wall_s"], free["seq_s"])
 
     def test_finish_matches_by_prefix_and_leaves_out_an_earlier_run(self):
         plan = self.write_plan({"name": "f", "stages": [
