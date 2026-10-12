@@ -1,0 +1,76 @@
+{
+  "skill_name": "lean-ultracode",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Use a workflow to review the modules billing, orders and stock through the lenses correctness and security, one agent per module and lens, and verify every finding adversarially. Do not launch it yet: prepare it and ask me how to launch it. Use LEAN_ULTRACODE_DATA=skills/lean-ultracode-workspace/iteration-1/eval-1/data for every usage.py call and save the plan, the script and the estimate output to skills/lean-ultracode-workspace/iteration-1/eval-1/with_skill/outputs/.",
+      "expected_output": "A plan JSON with one stage per phase (role, does, items), the verbatim usage.py estimate output with both modes, an AskUserQuestion with Thorough, Light and Change the plan, and a script tiered by role. Nothing is launched.",
+      "files": [],
+      "assertions": [
+        "Writes a plan JSON whose stages carry phase, role and does, with items for the six review agents",
+        "The phase of each plan stage matches the phase of the agent() calls in the script",
+        "Runs usage.py estimate on the plan and shows its output verbatim, with both the thorough and the light mode",
+        "Asks the user with AskUserQuestion offering the two modes as estimate names them plus Change the plan, each with its agents, cost and time",
+        "The review stage uses role analysis (sonnet / high in thorough) and the verify stage role verify (opus / medium in thorough)",
+        "Every agent() or run() call in the script sets model and effort, or spreads a constant that does",
+        "Does not launch the Workflow before the user answers"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "The user chose Thorough for the workflow planned in evals/files/plan.json. Register the run with LEAN_ULTRACODE_DATA=skills/lean-ultracode-workspace/iteration-1/eval-2/data and give me the final script, without launching it. Save the script and the start output to skills/lean-ultracode-workspace/iteration-1/eval-2/with_skill/outputs/.",
+      "expected_output": "usage.py start with --level thorough, its marker pasted right after export const meta, CAP set to the number it returned, and a run() wrapper that checks budget.spent() and returns dropped and spent.",
+      "files": [
+        "evals/files/plan.json"
+      ],
+      "assertions": [
+        "Runs usage.py start on the plan with --level thorough",
+        "Pastes the returned marker after the export const meta block, not before it",
+        "Sets const CAP to exactly the cap number the start command returned",
+        "Wraps agent() in a run() function that compares budget.spent() - S0 against CAP",
+        "The script returns dropped and spent (budget.spent() - S0) alongside its result",
+        "Does not launch the Workflow"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "/lean-ultracode light. Then prepare the workflow of evals/files/review-workflow.js for that mode, with LEAN_ULTRACODE_DATA=skills/lean-ultracode-workspace/iteration-1/eval-3/data, and save the estimate and the rewritten script to skills/lean-ultracode-workspace/iteration-1/eval-3/with_skill/outputs/. Do not launch it.",
+      "expected_output": "The mode is stored with usage.py mode light, the estimate is shown without asking, and the script uses the light models: analysis at sonnet / low, verify at sonnet / low, one vote and one round.",
+      "files": [
+        "evals/files/review-workflow.js"
+      ],
+      "assertions": [
+        "Runs usage.py mode light",
+        "Shows the estimate and does not ask the user to choose a mode",
+        "The review calls run at sonnet with effort low and the verify calls at sonnet with effort low",
+        "Registers the run with usage.py start --level light and uses its marker and cap",
+        "Does not launch the Workflow"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "The workflow-guard hook rejected evals/files/review-workflow.js with: 'line 20: run() without effort'. Fix it and save the corrected script to skills/lean-ultracode-workspace/iteration-1/eval-4/with_skill/outputs/review-workflow.js. Do not launch it.",
+      "expected_output": "Only the review call changes, to set effort (or spread T.review); the marker, CAP and the run() wrapper stay as they were, and the user is not asked anything.",
+      "files": [
+        "evals/files/review-workflow.js"
+      ],
+      "assertions": [
+        "The review run() call now sets effort, either explicitly or by spreading T.review",
+        "The marker line and const CAP are unchanged",
+        "No other agent call changes model or effort",
+        "Does not ask the user anything before fixing it"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Launch one subagent to find where the function parseInvoice is defined in this repo and tell me the file.",
+      "expected_output": "A single Agent call (or a direct search), without lean-ultracode: no plan, no usage.py, no mode question.",
+      "files": [],
+      "assertions": [
+        "Does not run usage.py",
+        "Does not write a workflow plan or a Workflow script",
+        "Does not ask the user to choose between thorough and light"
+      ]
+    }
+  ]
+}

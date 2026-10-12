@@ -1,0 +1,6 @@
+{"name": "review-modules", "stages": [
+  {"phase": "Review", "role": "analysis", "does": "reviews one module through one lens",
+   "items": ["review:billing:correctness", "review:billing:security", "review:orders:correctness",
+             "review:orders:security", "review:stock:correctness", "review:stock:security"]},
+  {"phase": "Verify", "role": "verify", "does": "tries to refute one finding", "agents": 8}
+]}

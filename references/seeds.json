@@ -1,0 +1,50 @@
+{
+  "_note": "Seed values (version = when prices changed; a change recomputes the usage ratios). price = relative price of each token type against one input token of the same model; the cache read depends on the model (Haiku/Sonnet 0.1; Opus 0.05; Fable 0.025). model_weight = the model's input price against Opus 5.5 (API list, 2026-09: Haiku 4.5 $1, Sonnet 5.5 $2, Opus 5.5 $4, Fable 5.1 $10 per million); usd_per_mu = dollars one million u costs. roles: default model and effort (the starting point Anthropic recommends for each model: Opus 5.5 at medium, agentic Sonnet 5.5 at medium/high, Haiku ignores effort) and the SHAPE of one agent of that role (turns, average context per turn, i.e. what it re-reads from cache every turn, and output tokens at the given effort), measured on real workflows in 2026-09: reviewers and searchers with tools ~25 turns at ~100k context; verifiers that get everything in their prompt ~4 turns at ~40k; trivial Haiku agents 2 turns, ~15k, ~300 output; implementers (implement) a median of 55 turns at ~135k and ~10k output, and correctors that apply given findings (fix) 16 turns at ~96k and ~1.5k output (30 samples, 2026-10). The cache write is approximated as ctx x (0.5 + 0.05 x turns). effort_output and effort_turns = how much output and turns change with effort (Anthropic measures per task: medium 70-87 % of the cost, low 33-50 %). seconds_per_turn = wall-clock seconds per turn of each model, measured on the same workflows. runaway_factor = output cap in thorough mode (brake against loops that never converge), light_factor in light and cut_factor in the fine-grained cuts, all over the estimated output. spent_ratio = budget.spent() over the real output of the agents (budget.spent() counts more than the agents' transcripts show; >4.4 measured 2026-10): the cap multiplies by it, and `finish --spent` learns it. `finish` learns the real shape and seconds per turn and replaces the seed.",
+  "version": "2026-09-30",
+  "roles": {
+    "mechanical": {"model": "haiku",  "effort": "low",    "turns": 4,  "ctx": 30000,  "output": 1500,  "for": "search, list, inventory, read and summarise without judgement"},
+    "extraction": {"model": "sonnet", "effort": "medium", "turns": 6,  "ctx": 40000,  "output": 3000,  "for": "pull data into a schema, transform, compare against a given rule"},
+    "analysis":   {"model": "sonnet", "effort": "high",   "turns": 25, "ctx": 90000,  "output": 12000, "for": "review through one lens, investigate a subsystem, find issues"},
+    "design":     {"model": "opus",   "effort": "medium", "turns": 24, "ctx": 100000, "output": 32000, "for": "design, choose between alternatives, write the deliverable"},
+    "implement":  {"model": "opus",   "effort": "medium", "turns": 55, "ctx": 135000, "output": 10000, "for": "implement a change in a codebase: read, edit, run its tests"},
+    "fix":        {"model": "opus",   "effort": "medium", "turns": 16, "ctx": 96000,  "output": 1500,  "for": "apply given review findings to an existing change"},
+    "verify":     {"model": "opus",   "effort": "medium", "turns": 4,  "ctx": 40000,  "output": 3000,  "for": "adversarial verification, refute a finding"},
+    "synthesis":  {"model": "opus",   "effort": "high",   "turns": 4,  "ctx": 90000,  "output": 25000, "for": "final judge, synthesis of the result"}
+  },
+  "light": {
+    "_note": "Light mode (less usage and effort): the cheapest model that still does the task, at the lowest effort, one vote and one round; every agent is kept (coverage is never cut). Never raises what the plan set lower.",
+    "mechanical": ["haiku",  "low"],
+    "extraction": ["haiku",  "low"],
+    "analysis":   ["sonnet", "low"],
+    "design":     ["sonnet", "medium"],
+    "implement":  ["sonnet", "medium"],
+    "fix":        ["sonnet", "medium"],
+    "verify":     ["sonnet", "low"],
+    "synthesis":  ["opus",   "low"]
+  },
+  "risk": {
+    "_note": "What light mode risks per role when it lowers the model: printed under the light estimate so the user weighs quality, not only cost.",
+    "extraction": "Haiku slips on schemas and rules more often: check the output",
+    "analysis":   "low effort finds fewer issues per lens",
+    "design":     "Sonnet weighs alternatives less well: review the deliverable",
+    "implement":  "Sonnet on core or engine code needs more correction rounds",
+    "fix":        "Sonnet may apply a finding literally and miss its intent",
+    "verify":     "a Sonnet verifier refutes less: more false findings survive",
+    "synthesis":  "low effort merges more shallowly"
+  },
+  "effort_output": {"low": 0.4, "medium": 0.7, "high": 1.0, "xhigh": 1.4, "max": 1.8},
+  "effort_turns":  {"low": 0.6, "medium": 0.85, "high": 1.0, "xhigh": 1.25, "max": 1.5},
+  "seconds_per_turn": {"haiku": 4, "sonnet": 10, "opus": 21, "fable": 17},
+  "price": {
+    "input": 1.0,
+    "cache_write": 1.25,
+    "output": 5.0,
+    "cache_read": {"haiku": 0.1, "sonnet": 0.1, "opus": 0.05, "fable": 0.025}
+  },
+  "model_weight": {"haiku": 0.25, "sonnet": 0.5, "opus": 1.0, "fable": 2.5},
+  "usd_per_mu": 4.0,
+  "runaway_factor": 3.0,
+  "light_factor": 2.0,
+  "cut_factor": 1.5,
+  "spent_ratio": 5.0
+}
