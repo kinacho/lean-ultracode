@@ -32,6 +32,7 @@ Own data (runs, samples, ratios, mode) in ~/.claude/lean-ultracode/, outside any
 import argparse
 import json
 import os
+import re
 import statistics
 import sys
 import time
@@ -74,6 +75,65 @@ def concurrency():
 
 
 CONCURRENCY = concurrency()
+
+# Claude Code settings that change what an agent really runs on, read in rising precedence (the managed
+# file wins). Claude Code also exports each file's `env` to the commands it runs, so os.environ counts.
+MANAGED = {"win32": Path(os.environ.get("ProgramFiles") or r"C:\Program Files") / "ClaudeCode" / "managed-settings.json",
+           "darwin": Path("/Library/Application Support/ClaudeCode/managed-settings.json")}.get(
+    sys.platform, Path("/etc/claude-code/managed-settings.json"))
+SIZE_GUIDE = {"small": 5, "medium": 10, "large": 50, "unrestricted": None}   # agents Claude aims below
+LARGE_AGENTS = 25   # Claude Code's advisory "Large workflow" warning (also past 1.5M projected tokens, which
+                    # tokens it counts is not documented: cache reads alone would pass it on every run)
+
+
+def settings_files():
+    cwd = Path.cwd() / ".claude"
+    return [HOME / ".claude" / "settings.json", cwd / "settings.json", cwd / "settings.local.json", MANAGED]
+
+
+def setting(key):
+    """The value of a top-level Claude Code setting, from the file with the highest precedence."""
+    val = None
+    for f in settings_files():
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict) and key in d:
+            val = d[key]
+    return val
+
+
+def env_setting(name):
+    return os.environ.get(name) or (setting("env") or {}).get(name)
+
+
+def harness_lines():
+    """What would make the agents run on another model or effort than the script asks for: said
+    before the user chooses, because the estimate would be wrong without a sound."""
+    out = []
+    eff = env_setting("CLAUDE_CODE_EFFORT_LEVEL")
+    if eff and str(eff).lower() != "auto":
+        out.append(f"⚠ CLAUDE_CODE_EFFORT_LEVEL={eff} overrides every agent's effort: the efforts below will not "
+                   "apply (unset it, or plan every stage at that effort)")
+    if str(env_setting("CLAUDE_CODE_SUBAGENT_MODEL_FORCE") or "").lower() in ("1", "true", "yes", "on"):
+        on = env_setting("CLAUDE_CODE_SUBAGENT_MODEL") or "the session's model"
+        out.append(f"⚠ CLAUDE_CODE_SUBAGENT_MODEL_FORCE is on: every agent runs on {on}; the models below will not apply")
+    cap = setting("maxEffortLevel")
+    if cap:
+        out.append(f"maxEffortLevel={cap}: efforts above it run at {cap}")
+    allowed = setting("availableModels")
+    if allowed:
+        out.append(f"availableModels={allowed}: a model outside it is substituted")
+    return out
+
+
+def size_guide():
+    """(name, agent count Claude aims below, set by the user?)."""
+    v = setting("workflowSizeGuideline")
+    if v in SIZE_GUIDE:
+        return v, SIZE_GUIDE[v], True
+    return "medium (small on Pro)", SIZE_GUIDE["medium"], False
 
 
 def norm_level(v):
@@ -119,11 +179,20 @@ def cache_read_price(model, seeds):
     return cr.get(model, 0.1) if isinstance(cr, dict) else cr
 
 
+def long_factor(model, prompt, seeds):
+    """Haiku 5.5 bills a request whose prompt (input + cache reads + cache writes) is over 100k tokens at
+    5x every price; the other models have one price up to 1M (seeds `long_prompt`)."""
+    lp = seeds.get("long_prompt", {}).get(model)
+    return lp["factor"] if lp and prompt > lp["over"] else 1.0
+
+
 def token_cost(model, tok, seeds):
-    """Cost in u of a handful of tokens of one model: input, cache write and read, output."""
+    """Cost in u of ONE request of one model: input, cache write and read, output."""
     p = seeds["price"]
-    return weight(model, seeds) * (p["input"] * tok["input"] + p["cache_write"] * tok["cache_write"]
-                                   + cache_read_price(model, seeds) * tok["cache_read"] + p["output"] * tok["output"])
+    prompt = tok["input"] + tok["cache_write"] + tok["cache_read"]
+    return weight(model, seeds) * long_factor(model, prompt, seeds) * (
+        p["input"] * tok["input"] + p["cache_write"] * tok["cache_write"]
+        + cache_read_price(model, seeds) * tok["cache_read"] + p["output"] * tok["output"])
 
 
 # ── shapes by role and seconds per turn: seeded or learned ──────────────────────────────────────
@@ -180,7 +249,7 @@ def stage_shape(st, role, seeds, shapes):
 
 
 def agent_cost(model, effort, shape, seeds):
-    """Cost of ONE agent in u, its output tokens and its turns.
+    """Cost of ONE agent in u, its output tokens, its turns and its raw tokens (cache reads included).
 
     Every turn re-reads the whole context (cache read) and writes what is new (cache write); turns and
     output scale with effort against the effort the shape was measured at (lower effort, fewer tool
@@ -191,7 +260,7 @@ def agent_cost(model, effort, shape, seeds):
     write = shape["write"] if shape.get("write") else ctx * (0.5 + 0.05 * turns)
     out = shape["output"] * eo[effort] / eo[shape["effort"]]
     u = cache_read_price(model, seeds) * ctx * turns + p["cache_write"] * write + p["output"] * out
-    return u * weight(model, seeds), out, turns
+    return u * weight(model, seeds) * long_factor(model, ctx, seeds), out, turns, ctx * turns + write + out
 
 
 # ── levels and estimate ─────────────────────────────────────────────────────────────────────────
@@ -276,14 +345,14 @@ def estimate(plan, level, seeds, shapes, spt):
     "sequential" runs its agents one by one; a plan marked "sequential" runs every agent one by one.
     "wait" = seconds of each round that are not agents (test runs, builds): they add to the time, not to
     the cost."""
-    rows, cost, out, n, chain, total_s, waits = [], 0.0, 0.0, 0, 0.0, 0.0, 0.0
+    rows, cost, out, n, chain, total_s, waits, tokens = [], 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0
     serial = bool(plan.get("sequential"))
     for st, key in zip(plan["stages"], stage_keys(plan)):
         role = st.get("role", "analysis")
         model, effort, agents, votes, rounds = stage_at_level(st, level, seeds)
         count = agents * votes * rounds
         shape = stage_shape(st, role, seeds, shapes)
-        u1, o1, t1 = agent_cost(model, effort, shape, seeds)
+        u1, o1, t1, k1 = agent_cost(model, effort, shape, seeds)
         secs = t1 * spt.get(model, 20)
         wait = float(st.get("wait") or 0) * rounds
         items = stage_items(st)
@@ -296,6 +365,7 @@ def estimate(plan, level, seeds, shapes, spt):
                      "output": o1, "seconds": secs, "wait": wait, "cost": count * u1, "src": shape["src"]})
         cost += count * u1
         out += count * o1
+        tokens += count * k1
         n += count
         if serial or st.get("sequential"):
             chain += secs * count + wait        # its agents, one after another
@@ -306,7 +376,7 @@ def estimate(plan, level, seeds, shapes, spt):
     seq = total_s + waits                       # everything, one after another
     wall = seq if serial else min(seq, max(chain, total_s / CONCURRENCY + waits) * 1.1)
     return {"rows": rows, "cost": cost, "output": out, "agents": n, "wall_s": wall, "seq_s": seq,
-            "wait_s": waits, "sequential": serial, "concurrency": CONCURRENCY}
+            "wait_s": waits, "sequential": serial, "concurrency": CONCURRENCY, "tokens": tokens}
 
 
 # ── real measurement from a workflow's transcripts ──────────────────────────────────────────────
@@ -347,9 +417,10 @@ def parse_ts(s):
         return None
 
 
-def read_agent(f):
+def read_agent(f, seeds):
     """A message appears several times in the transcript (once per block): count the last entry of
-    each id. Returns (model, turns, tokens, start, end) or None if the agent never spoke."""
+    each id. Returns (model, turns, tokens, cost, start, end) or None if the agent never spoke. The cost
+    is summed request by request: Haiku 5.5 prices each one by its own prompt length."""
     last, t0, t1 = {}, None, None
     for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
@@ -365,21 +436,29 @@ def read_agent(f):
             last[m["id"]] = m
     if not last:
         return None
-    tok = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
+    model = family(next(iter(last.values())).get("model"))
+    tok, cost = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}, 0.0
     for m in last.values():
-        u = m["usage"]
-        tok["input"] += u.get("input_tokens") or 0
-        tok["cache_write"] += u.get("cache_creation_input_tokens") or 0
-        tok["cache_read"] += u.get("cache_read_input_tokens") or 0
-        tok["output"] += u.get("output_tokens") or 0
-    return family(next(iter(last.values())).get("model")), len(last), tok, t0, t1
+        one = usage_tokens(m["usage"])
+        cost += token_cost(model, one, seeds)
+        for k in tok:
+            tok[k] += one[k]
+    return model, len(last), tok, cost, t0, t1
+
+
+def usage_tokens(u):
+    return {"input": u.get("input_tokens") or 0, "cache_write": u.get("cache_creation_input_tokens") or 0,
+            "cache_read": u.get("cache_read_input_tokens") or 0, "output": u.get("output_tokens") or 0}
+
+
+RETRY = re.compile(r"\s*\(retry \d+\)\s*$")   # an agent that stalled and started over (up to 5 times)
 
 
 def assign(a, rows):
     """The plan stage an agent belongs to: its label among a stage's items, else a stage whose `prefix`
     starts its label, else the only stage with its phase (or, with several, the only one of its model).
     None if nothing matches."""
-    label, phase = a.get("label") or "", norm(a["phase"])
+    label, phase = RETRY.sub("", a.get("label") or ""), norm(a["phase"])
     for r in rows:
         if label and label in (r.get("items") or []):
             return r["key"]
@@ -399,10 +478,10 @@ def measure(tdir, seeds, since=None, rows=None):
     tdir = Path(tdir).expanduser()
     labels, agents, before = agent_labels(tdir), [], 0
     for f in sorted(tdir.rglob("agent-*.jsonl")):
-        r = read_agent(f)
+        r = read_agent(f, seeds)
         if not r:
             continue
-        model, turns, tok, t0, t1 = r
+        model, turns, tok, cost, t0, t1 = r
         if since and t0 and t0 < since - 120:
             before += 1
             continue
@@ -410,7 +489,7 @@ def measure(tdir, seeds, since=None, rows=None):
         dur = (t1 - t0) if (t0 and t1) else 0.0
         agents.append({"phase": phase or "?", "label": label, "model": model, "turns": turns,
                        "ctx": tok["cache_read"] / turns, "write": tok["cache_write"], "output": tok["output"],
-                       "cost": token_cost(model, tok, seeds), "tok": tok, "dur": dur, "spt": dur / turns,
+                       "cost": cost, "tok": tok, "dur": dur, "spt": dur / turns,
                        "t0": t0, "t1": t1})
     for a in agents:
         a["group"] = (assign(a, rows) if rows else None) or a["phase"]
@@ -462,10 +541,7 @@ def measure_window(t0, t1, seeds):
                 seen[m["id"]] = m
     cost = 0.0
     for m in seen.values():
-        u = m["usage"]
-        tok = {"input": u.get("input_tokens") or 0, "cache_write": u.get("cache_creation_input_tokens") or 0,
-               "cache_read": u.get("cache_read_input_tokens") or 0, "output": u.get("output_tokens") or 0}
-        cost += token_cost(family(m.get("model")), tok, seeds)
+        cost += token_cost(family(m.get("model")), usage_tokens(m["usage"]), seeds)
     return cost, len(seen)
 
 
@@ -712,6 +788,10 @@ def cmd_status(_):
         print(line)
     print(f"Brake: budget.spent() ≈ {c['spent_ratio']:.1f}× the agents' real output "
           + (f"(learned, {c['n_spent']} runs)" if c["n_spent"] else "(seed; `finish --spent` learns it)"))
+    name, n, _ = size_guide()
+    print(f"Size guideline: {name}" + (f" — Claude aims below {n} agents per workflow" if n else ""))
+    for line in harness_lines():
+        print(line)
     for r in open_runs():
         print(f"Run left open: {r['id']} ({r['name']}, level {r['level']}) → "
               f"usage.py finish {r['id']} --wf <Workflow runId>")
@@ -735,8 +815,13 @@ def impact_line(cost, c, p5, p7):
     s = f" → 5 h +{d5:.0f} % ({p5:.0f} → {p5 + d5:.0f} %)"
     if d7 is not None and p7 is not None:
         s += f" · weekly +{d7:.0f} % ({p7:.0f} → {p7 + d7:.0f} %)"
-    if p5 + d5 >= 90:
+    if p5 + d5 >= 100:
+        s += ("  ⚠ passes 100 %: at the limit the run pauses until the 5-hour reset and goes on alone "
+              "(Claude Code ≥ 2.1.271, autoContinueAtUsageLimit on); otherwise those agents fail")
+    elif p5 + d5 >= 90:
         s += "  ⚠ leaves the 5-hour window above 90 %"
+    if d7 is not None and p7 is not None and p7 + d7 >= 100:
+        s += "  ⚠ passes the weekly limit: a reset more than 24 h away is not waited for, those agents fail"
     return s
 
 
@@ -779,6 +864,26 @@ def risk_lines(deep, light, seeds):
     return out
 
 
+def plan_notes(plan, e):
+    """The size guideline, Claude Code's "Large workflow" warning and the agents' cache TTL."""
+    out = []
+    name, n, chosen = size_guide()
+    if n and e["agents"] >= n:
+        out.append(f"⚠ {e['agents']} agents against the size guideline {name} (fewer than {n}): it is advice, kept only "
+                   "when the user's request calls for that scale — say so, or cut the plan")
+    limit = n if chosen and n else LARGE_AGENTS
+    if e["agents"] > limit:
+        out.append(f"Claude Code will flag it as a 'Large workflow' ({e['agents']} agents, over {limit}): advisory, "
+                   "not shown with ultracode on")
+    if str(setting("subagentPromptCacheTtl") or "5m") != "1h":
+        waits = [st.get("phase", "?") for st in plan["stages"] if float(st.get("wait") or 0) > 300]
+        if waits or plan.get("sequential"):
+            out.append("The agents' prompt cache lasts 5 min: after " + (f"the waits of {', '.join(waits)}" if waits
+                       else "each agent of a sequential plan") + " the next agent writes it again "
+                       "(subagentPromptCacheTtl: 1h keeps it, at a 2× write price)")
+    return out
+
+
 def cmd_estimate(a):
     seeds, plan, snap = load_seeds(), json.loads(Path(a.plan).read_text(encoding="utf-8")), read_snapshot()
     c = calibration(seeds, snap)
@@ -792,6 +897,8 @@ def cmd_estimate(a):
     print(mode_line())
     print()
     print(f"Workflow '{plan.get('name', '?')}': {len(plan['stages'])} phases · " + shapes_line(c, seeds))
+    for line in harness_lines() + plan_notes(plan, deep):
+        print(line)
     print()
     print_mode(LEVEL_NAMES["thorough"], deep, c, p5, p7, seeds, items=True)
     print()

@@ -64,12 +64,13 @@
     {
       "id": 5,
       "prompt": "Launch one subagent to find where the function parseInvoice is defined in this repo and tell me the file.",
-      "expected_output": "A single Agent call (or a direct search), without lean-ultracode: no plan, no usage.py, no mode question.",
+      "expected_output": "A single Agent call (or a direct search) with only §7 of lean-ultracode: model haiku and effort low on the call, no plan, no usage.py, no mode question.",
       "files": [],
       "assertions": [
         "Does not run usage.py",
         "Does not write a workflow plan or a Workflow script",
-        "Does not ask the user to choose between thorough and light"
+        "Does not ask the user to choose between thorough and light",
+        "If it launches an Agent, the call passes model haiku and effort low"
       ]
     }
   ]

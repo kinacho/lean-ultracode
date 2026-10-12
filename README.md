@@ -20,6 +20,13 @@ steps in every time Claude is about to launch a workflow:
    cap prevents is reported, never dropped silently.
 4. **Measures the real run** from the agents' transcripts, compares it with the estimate phase by
    phase, and learns from it, so the next estimate is closer.
+5. **Warns when the settings would override it.** If `CLAUDE_CODE_EFFORT_LEVEL` or
+   `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` is set, the models and efforts the script asks for will not apply.
+   The estimate also flags a plan above your `workflowSizeGuideline` and a run that would cross the
+   usage limit, which then pauses until the reset.
+
+Single `Agent` calls outside a workflow get only the first point: a model and an effort for their
+role, passed on the call (Claude Code ≥ 2.1.292), with no estimate and no question.
 
 Everything runs locally, using only the Python standard library. Nothing is sent anywhere.
 
@@ -146,8 +153,8 @@ Two extras live in your Claude Code settings, so the skill never installs them i
 [`references/setup.md`](references/setup.md) has the exact snippets.
 
 1. **Guard hook.** A `PreToolUse` hook on `Workflow` rejects any script that skipped the skill: one
-   without the marker, with an agent that has no model or effort, without the spending brake, or with
-   a phase name the registered plan does not have. The rejection names the line to fix.
+   without the marker, with an agent that has no model or effort, with a full model ID where only an
+   alias is accepted, without the spending brake, or with a phase name the registered plan does not have. The rejection names the line to fix.
 2. **Usage snapshot.** The 5-hour and weekly percentages only reach the status line command.
    `scripts/statusline-snapshot.sh`, called from your status line, saves them so the estimate can
    project them. Without it you still get agents, cost and time, just no percentages.
@@ -239,8 +246,9 @@ yourself to look inside.
 ## How the numbers work
 
 - **Cost unit `u`:** one Opus input token. Every other kind of token is weighted by its list price:
-  output 5, cache write 1.25, cache read 0.05 on Opus and 0.1 on Sonnet and Haiku. Each model is
-  weighted by its input price relative to Opus: Haiku 0.25, Sonnet 0.5, Fable 2.5. One million u is
+  output 5, cache write 1.25, cache read 0.05 on Opus and Sonnet, 0.1 on Haiku and 0.025 on Fable.
+  Each model is weighted by its input price relative to Opus: Haiku 0.025 (5× on a request over 100k
+  prompt tokens), Sonnet 0.5, Fable 2.5. One million u is
   about $4 at API list prices. The weights live in
   [`references/seeds.json`](references/seeds.json).
 - **Shapes:** most of an agent's cost is the context it re-reads on every turn. A role's shape

@@ -4,6 +4,7 @@ They run every script the way Claude Code runs it (a subprocess), with HOME poin
 folder so the real ~/.claude is never read or written, and with a cp1252 console encoding to catch
 what breaks on Windows. CI runs them on Linux, macOS and Windows.
 """
+import importlib.util
 import json
 import os
 import shutil
@@ -30,7 +31,9 @@ class Sandbox(unittest.TestCase):
                         LEAN_ULTRACODE_DATA=str(self.data),
                         PYTHONIOENCODING="cp1252")   # a Windows console: cannot encode ≈ or →
         self.env.pop("PYTHONUTF8", None)
-        self.env.pop("CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS", None)
+        for k in ("CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS", "CLAUDE_CODE_EFFORT_LEVEL",
+                  "CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL_FORCE"):
+            self.env.pop(k, None)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -41,6 +44,11 @@ class Sandbox(unittest.TestCase):
         out = p.stdout.decode("utf-8", errors="replace")
         self.assertEqual(p.returncode, 0, f"{script.name} {args} failed:\n{p.stderr.decode('utf-8', 'replace')}")
         return out
+
+    def write_settings(self, settings):
+        d = self.tmp / ".claude"
+        d.mkdir(exist_ok=True)
+        (d / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
 
     def write_plan(self, plan):
         f = self.tmp / "plan.json"
@@ -130,6 +138,63 @@ class TestUsage(Sandbox):
         self.assertTrue(any(s.get("spent_ratio") for s in samples))
 
 
+    def test_an_effort_forced_by_the_environment_is_flagged(self):
+        self.assertNotIn("CLAUDE_CODE_EFFORT_LEVEL", self.run_py(USAGE, "status"))
+        self.env["CLAUDE_CODE_EFFORT_LEVEL"] = "low"
+        self.assertIn("CLAUDE_CODE_EFFORT_LEVEL=low overrides every agent's effort", self.run_py(USAGE, "status"))
+
+    def test_a_forced_model_in_the_settings_is_flagged(self):
+        self.write_settings({"env": {"CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1", "CLAUDE_CODE_SUBAGENT_MODEL": "haiku"}})
+        self.assertIn("every agent runs on haiku", self.run_py(USAGE, "estimate", PLAN))
+
+    def test_the_size_guideline_and_the_large_workflow_warning(self):
+        self.write_settings({"workflowSizeGuideline": "small"})
+        out = self.run_py(USAGE, "estimate", PLAN)
+        self.assertIn("14 agents against the size guideline small (fewer than 5)", out)
+        self.assertIn("'Large workflow' (14 agents, over 5)", out)   # a chosen guideline moves the threshold
+        self.write_settings({"workflowSizeGuideline": "large"})
+        self.assertNotIn("size guideline", self.run_py(USAGE, "estimate", PLAN))
+
+
+def load_usage():
+    spec = importlib.util.spec_from_file_location("usage", USAGE)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestPricing(unittest.TestCase):
+    def setUp(self):
+        self.u = load_usage()
+        self.seeds = self.u.load_seeds()
+
+    def tok(self, cache_read):
+        return {"input": 10, "cache_write": 1000, "cache_read": cache_read, "output": 500}
+
+    def test_haiku_prices_a_long_prompt_at_five_times(self):
+        short, long = self.u.token_cost("haiku", self.tok(90000), self.seeds), self.u.token_cost("haiku", self.tok(150000), self.seeds)
+        base = lambda cr: self.u.weight("haiku", self.seeds) * (10 + 1.25 * 1000 + 0.1 * cr + 5 * 500)
+        self.assertAlmostEqual(short, base(90000))
+        self.assertAlmostEqual(long, 5 * base(150000))
+        # Sonnet and Opus: one price up to 1M
+        self.assertAlmostEqual(self.u.token_cost("opus", self.tok(150000), self.seeds), 10 + 1250 + 0.05 * 150000 + 2500)
+
+    def test_haiku_is_the_cheapest_by_far(self):
+        self.assertLess(self.u.weight("haiku", self.seeds) * 10, self.u.weight("sonnet", self.seeds))
+
+    def test_a_retried_agent_keeps_its_stage(self):
+        rows = [{"key": "Review", "phase": "Review", "items": ["lens:a"], "model": "sonnet"},
+                {"key": "Verify", "phase": "Verify", "items": [], "model": "opus"}]
+        a = {"label": "lens:a (retry 2)", "phase": "Verify", "model": "opus"}
+        self.assertEqual(self.u.assign(a, rows), "Review")
+
+    def test_passing_the_limit_says_the_run_will_pause(self):
+        c = {"r5": 10.0, "r7": 1.0}
+        self.assertIn("pauses until the 5-hour reset", self.u.impact_line(2e6, c, 85, 20))
+        self.assertIn("above 90 %", self.u.impact_line(0.6e6, c, 85, 20))
+        self.assertIn("weekly limit", self.u.impact_line(2e6, c, 10, 99))
+
+
 class TestHook(Sandbox):
     def hook(self, script):
         payload = json.dumps({"tool_name": "Workflow", "tool_input": {"script": script}}, ensure_ascii=False)
@@ -155,6 +220,10 @@ class TestHook(Sandbox):
     def test_passes_a_correct_script_with_non_ascii_text(self):
         self.register(["Review", "Verify"])
         self.assertIsNone(self.hook(self.fixed_fixture()))
+
+    def test_rejects_a_full_model_id(self):
+        script = self.fixed_fixture().replace("model: 'sonnet'", "model: 'claude-sonnet-5-5'")
+        self.assertIn("takes only an alias", self.hook(script))
 
     def test_rejects_a_phase_the_plan_does_not_have(self):
         self.register(["Lenses", "Verify"])

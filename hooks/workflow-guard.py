@@ -11,6 +11,7 @@
   4. A child workflow launched with workflow({scriptPath: '…'}) is checked the same way (one level).
   5. Every literal `phase: '…'` must be a phase of the plan registered under run=ID (what `finish`
      matches the real agents against): a renamed phase would otherwise surface only after the run.
+  6. A literal model is an alias (haiku, sonnet, opus, fable): a per-agent model takes no full model ID.
 
 A saved workflow (tool_input.name, or workflow('name')) cannot be read and passes unchecked.
 """
@@ -24,6 +25,8 @@ from pathlib import Path
 # the same folder usage.py writes the runs to
 DATA = Path(os.environ.get("LEAN_ULTRACODE_DATA") or Path.home() / ".claude" / "lean-ultracode")
 PHASE = re.compile(r"\bphase\s*:\s*(['\"])([^'\"\n]*)\1")
+MODEL = re.compile(r"\bmodel\s*:\s*(['\"])([^'\"\n]*)\1")
+ALIASES = {"haiku", "sonnet", "opus", "fable"}
 
 CALL = re.compile(r"(?<![\w.$])(agent|run)\s*\(")
 MARK = re.compile(r"lean-ultracode:\s*level=(thorough|light|100|75|50|25|off)\b([^\n]*)")
@@ -138,6 +141,12 @@ def check(script, depth=0):
         n = cap.group(1).replace("_", "")
         if not re.search(rf"(?<!\d){n}(?!\d)", body.replace("_", "")):
             problems.append(f"the marker's cap ({n}) does not appear in the script: set `const CAP = {n}`")
+    code = TOKENS.sub(lambda m: "" if m.group(0)[0] == "/" else m.group(0), script)   # comments out, strings kept
+    for mm in MODEL.finditer(code):
+        if mm.group(2).strip().lower() not in ALIASES:
+            line = code.count("\n", 0, mm.start()) + 1
+            problems.append(f"line {line}: model '{mm.group(2)}': a per-agent model takes only an alias "
+                            "(haiku, sonnet, opus, fable), not a full model ID")
     if "budget.spent()" not in body:
         problems.append("the script never checks budget.spent(): use the skill's run() wrapper with the cap (brake against loops)")
     problems += check_calls(body)

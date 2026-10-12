@@ -1,8 +1,8 @@
 ---
 name: lean-ultracode
-description: Use this skill when you are about to author or launch any Workflow script — whether ultracode is on or the user asked for a workflow — and whenever the user types /lean-ultracode (args thorough|light|75%|50%|25%|ask|off|status). Give every agent() the model and effort its task needs instead of the inherited session model, estimate the run in two modes — thorough (the model each task needs, more usage and effort) and light (the cheapest model that still does it, less usage and effort) — with agents and what each does, cost, impact on the 5-hour and weekly usage limits and wall-clock time, show both to the user and let them choose before launching, then measure the real run. Do not use it for single Agent calls outside a workflow. The optional workflow-guard hook rejects scripts that skip it.
+description: Use this skill when you are about to author or launch any Workflow script — whether ultracode is on or the user asked for a workflow — and whenever the user types /lean-ultracode (args thorough|light|75%|50%|25%|ask|off|status). Give every agent() the model and effort its task needs instead of the inherited session model, estimate the run in two modes — thorough (the model each task needs, more usage and effort) and light (the cheapest model that still does it, less usage and effort) — with agents and what each does, cost, impact on the 5-hour and weekly usage limits and wall-clock time, show both to the user and let them choose before launching, then measure the real run. Before a single Agent call outside a workflow, use only §7 to give it a model and effort. The optional workflow-guard hook rejects scripts that skip it.
 metadata:
-  version: "1.5.0"
+  version: "1.6.0"
 ---
 
 # lean-ultracode
@@ -45,7 +45,7 @@ task (`references/anthropic-model-guide.md`, `references/seeds.json`):
 
 | Role | Thorough | Light | For |
 |---|---|---|---|
-| `mechanical` | haiku / low | haiku / low | search, list, inventory, read and summarise without judgement (Haiku ignores effort) |
+| `mechanical` | haiku / low | haiku / low | search, list, inventory, read and summarise without judgement |
 | `extraction` | sonnet / medium | haiku / low | pull data into a schema, transform, compare against a given rule |
 | `analysis` | sonnet / high | sonnet / low | review through one lens, investigate a subsystem, find issues |
 | `design` | opus / medium | sonnet / medium | design, choose between alternatives, write the deliverable |
@@ -55,6 +55,10 @@ task (`references/anthropic-model-guide.md`, `references/seeds.json`):
 | `synthesis` | opus / high | opus / low | final judge, synthesis |
 
 Light also sets one vote and one round everywhere; it never cuts agents or coverage.
+
+Pass both on every agent: Opus 5.5, Sonnet 5.5 and Haiku 5.5 all take `low` to `max`, and an agent
+without an effort runs at the session's level, not at the one its role needs. `model` takes only an
+alias (`haiku`, `sonnet`, `opus`, `fable`), never a full model ID; the hook rejects one.
 
 Each role also has a **shape** — turns, average context per turn and output tokens of one agent —
 seeded from real runs and re-learned from every `finish` (§4). So a role is a shape, not only a
@@ -72,6 +76,11 @@ every turn, is what costs; lower effort makes fewer tool calls, so it also short
 - A custom subagent (`agentType`, e.g. a project's own reviewer agent) already carries its model and
   effort: use it as is and mark the stage `agentType` in the plan, with its `model`/`effort`.
 - If a stage comes out weak, raise *that* stage next time (effort first, then model), not all of them.
+- Keep one model, effort, schema and agent type across a stage's agents: agents that match share the
+  prompt cache (the first writes the prefix, the rest start up to 5 s later and read it). Varying one
+  of them inside a fan-out makes every agent pay its own prefix.
+- Haiku 5.5 bills a request whose prompt passes 100k tokens at 5× every price. Keep a Haiku agent's
+  reading small (it is the `mechanical` role); a stage that reads more belongs on Sonnet.
 
 In the script, options come from a table of constants and a `run()` wrapper with the runaway brake:
 
@@ -158,7 +167,10 @@ From Anthropic's measurements (`references/anthropic-model-guide.md`), for every
    ```
 2. Run `usage.py estimate plan.json` and show the output **verbatim**: for each mode, agents and what
    each does, model and effort per stage, cost in tokens, projected 5-hour and weekly usage, and
-   wall-clock in parallel against sequential.
+   wall-clock in parallel against sequential. Its ⚠ lines go into the question as well: an effort or
+   model forced by the environment (`CLAUDE_CODE_EFFORT_LEVEL`, `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`)
+   makes the per-stage choices moot, and a plan above the size guideline (`workflowSizeGuideline`)
+   needs the user's request to call for that scale.
 3. Ask with AskUserQuestion, in the user's language — "How should I launch the workflow?" — with the
    two modes named exactly as `estimate` prints them (thorough: more usage and effort; light: less usage
    and effort) and "Change the plan". Thorough is recommended, unless the 5-hour window would end ≥ 90 %,
@@ -185,8 +197,9 @@ From Anthropic's measurements (`references/anthropic-model-guide.md`), for every
   `scripts/statusline-snapshot.sh`, called from the status line, writes on every refresh with
   `rate_limits` (`references/setup.md` §2). If it is missing or stale, say so; never invent a percentage.
 - **Cost unit `u`** = one Opus input token. Weights by token type: input 1, cache write 1.25, output 5,
-  cache read 0.1 (Haiku, Sonnet), 0.05 (Opus), 0.025 (Fable); by model, list price of input vs Opus:
-  haiku 0.25, sonnet 0.5, opus 1, fable 2.5 (`seeds.json`, API list prices 2026-09). 1M u ≈ $4.
+  cache read 0.1 (Haiku), 0.05 (Sonnet, Opus), 0.025 (Fable); by model, list price of input vs Opus:
+  haiku 0.025, sonnet 0.5, opus 1, fable 2.5, and Haiku ×5 on a request over 100k prompt tokens
+  (`seeds.json`, API list prices 2026-10-12). 1M u ≈ $4.
 - **Effort** scales both turns and output (`effort_turns`, `effort_output`), seeded from Anthropic's
   per-task figures: `medium` ≈ 70-87 % of the cost of `high`, `low` ≈ 33-50 %.
 - **Time**: seconds per turn per model, measured on real runs (Haiku ~4, Sonnet ~10, Opus ~21, Fable
@@ -210,6 +223,14 @@ From Anthropic's measurements (`references/anthropic-model-guide.md`), for every
     is projected. A price change in `seeds.json` recomputes every ratio.
   - *What `budget.spent()` counts*: `finish --spent` records it against the agents' real output, and
     the median replaces the seed `spent_ratio` in the next cap.
+- **What the runtime does that changes the numbers** (Claude Code docs, 2026-10):
+  - At the 5-hour limit the run pauses until the reset and goes on alone (≥ 2.1.271, interactive,
+    `autoContinueAtUsageLimit` on, at most twice); a weekly reset more than 24 h away is not waited for
+    and those agents fail. `estimate` says which applies when a mode passes 100 %.
+  - An agent that stalls starts over, up to five times, and every attempt's tokens count: the real cost
+    can exceed the estimate without any loop. `finish` folds `(retry N)` labels into their stage.
+  - The agents' prompt cache lasts 5 minutes (`subagentPromptCacheTtl: 1h` keeps it, at a 2× write
+    price), so the agent after a long `wait` or in a sequential chain writes its prefix again.
 - It is approximate: usage on claude.ai or another machine also moves the % and is invisible here. It
   tells whether a workflow fits, not accounting.
 - Data in `~/.claude/lean-ultracode/` (per user, outside any repo): `runs/*.json`, `calibration.jsonl`
@@ -240,3 +261,18 @@ if the marker is missing or lacks `run=` or `cap=` (the cap number must appear i
 spread also pass), if it never checks `budget.spent()`, or if a literal `phase: '…'` is not a phase of
 the plan registered under that `run=`. A child launched with `workflow({scriptPath})` is checked the same
 way. The rejection reason names the line to fix: fix it and relaunch, without asking the user.
+
+## 7. Single Agent calls (outside a workflow)
+
+The Agent tool takes `model` and `effort` per call (Claude Code ≥ 2.1.292). Only this section applies
+there: no plan, no estimate, no question and no measurement.
+
+- Pass both on every call, from the §1 table in thorough mode: a search is `mechanical` (haiku / low),
+  a review through one lens `analysis` (sonnet / high), a design or an implementation opus / medium.
+- `xhigh` and `max` never go to a worker. A custom `subagent_type` that declares more effort than its
+  role needs is overruled by the call's `effort`.
+- Say in the prompt what the agent may skip at `low` and what it must check at `high`, so the
+  instructions and the effort agree.
+- A `fork` inherits the session's model and ignores `effort`: do not pass them.
+- `CLAUDE_CODE_EFFORT_LEVEL` and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` override the call;
+  `usage.py status` says when either is set.
